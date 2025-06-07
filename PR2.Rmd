@@ -1,0 +1,559 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+### Limpieza
+
+Importamos el dataset y vemos las dimensiones
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(tidyr)
+
+df=read.csv("Dataset.csv", sep=";")
+
+dim(df)
+head(df)
+```
+
+Vamos a separar aviacion general (vuelos privados de por ejemplo avionetas, vuelos corporativos, entrenamiento, pruebas de aviones etc.) de aviación comercial, esto lo hacemos mediante el FAR.
+
+```{r}
+# Dataset de aviación general
+df_aviacion_general <- df %>%
+  filter(FAR == "91")
+
+# Dataset de aviación comercial (121 y 135)
+df_aviacion_comercial <- df %>%
+  filter(FAR %in% c("121", "135"))
+
+# Dataset de otros (distintos de 91, 121, 135 y no vacíos)
+df_otros <- df %>%
+  filter(!(FAR %in% c("91", "121", "135")) & !is.na(FAR) & FAR != "")
+```
+
+#### Aviacion a lo largo de los años
+
+```{r}
+
+df_aviacion_general <- df_aviacion_general %>%
+  mutate(year = year(ymd_hms(EventDate)))
+
+df_aviacion_comercial <- df_aviacion_comercial %>%
+  mutate(year = year(ymd_hms(EventDate)))
+
+df_otros <- df_otros %>%
+  mutate(year = year(ymd_hms(EventDate)))
+
+aviacion_general_counts <- df_aviacion_general %>%
+  count(year) %>%
+  mutate(tipo = "Aviación general")
+
+aviacion_comercial_counts <- df_aviacion_comercial %>%
+  count(year) %>%
+  mutate(tipo = "Aviación comercial")
+
+otros_counts <- df_otros %>%
+  count(year) %>%
+  mutate(tipo = "Otros")
+
+todos_counts <- bind_rows(aviacion_general_counts, aviacion_comercial_counts, otros_counts)
+
+df_combinado <- todos_counts %>%
+  pivot_wider(names_from = tipo, values_from = n, values_fill = 0)
+
+write.csv(df_combinado, "df_combinado.csv", row.names = FALSE)
+```
+
+#### Enriquecimiento
+
+Ahora nos vamos a concentrar en el dataset de aviacion comercial "df_aviacion_comercial", lo que quiero es ver el porcentaje de **accidentados** con respecto a la **capacidad** del avion a lo largo de los años, es decir por ejemplo cuando hay accidentes el 30% de los pasajeros resultan heridos etc. Para ello tenemos que enriquecer el dataset con la capacidad del avión.
+
+Empezamos por ver los tipos de modelos
+
+```{r}
+model_frecuencias <- df_aviacion_comercial %>%
+  count(Model, sort = TRUE, name = "frecuencia")
+```
+
+Vemos que existen diferentes nombres para el mismo modelo, por ejemplo el 737, B737 y el BOEIN-737 todos el mismo modelos, vamos a unificarlos, para ello usaremos un diccionario.
+
+```{r}
+# Función para unificar modelos
+unificar_modelo <- function(modelo) {
+  # Separar si hay varios modelos por coma
+  modelos <- unlist(strsplit(modelo, ","))
+  
+  # Limpiar espacios y mayúsculas
+  modelos <- trimws(toupper(modelos))
+  
+  # Buscar patrón para cada submodelo
+  modelos_unificados <- sapply(modelos, function(x) {
+    # Aviones Boeing
+    if (grepl("737", x)) return("737")
+    if (grepl("747", x)) return("747")
+    if (grepl("727", x)) return("727")
+    if (grepl("757", x)) return("757")
+    if (grepl("767", x)) return("767")
+    if (grepl("777", x)) return("777")
+    if (grepl("787", x)) return("787")
+    
+    # Airbus
+    if (grepl("A300", x)) return("A300")
+    if (grepl("A310", x)) return("A310")
+    if (grepl("A319", x)) return("A319")
+    if (grepl("A320", x)) return("A320")
+    if (grepl("A321", x)) return("A321")
+    
+    # Otros
+    if (grepl("DC-?8", x)) return("DC-8")
+    if (grepl("DC-?9", x)) return("DC-9")
+    if (grepl("DC-?10", x)) return("DC-10")
+    if (grepl("MD[-]?8", x)) return("MD-80")
+    if (grepl("MD[-]?9", x)) return("MD-90")
+    if (grepl("F28", x)) return("F28")
+    if (grepl("EMB[- ]?120", x)) return("EMB-120")
+    if (grepl("ERJ", x)) return("ERJ")
+    if (grepl("CRJ", x)) return("CRJ")
+    if (grepl("C[ -]?130", x)) return("C-130")
+    if (grepl("KING AIR", x)) return("KING AIR")
+    if (grepl("BE[- ]?1900", x)) return("BEECH 1900")
+    if (grepl("PA[- ]?34", x)) return("PA-34")
+    if (grepl("PA[- ]?31", x)) return("PA-31")
+    if (grepl("PA[- ]?32", x)) return("PA-32")
+    if (grepl("PA[- ]?28", x)) return("PA-28")
+    if (grepl("CESSNA", x) || grepl("C[ -]?172", x)) return("C172")
+    
+    # Si no encaja, devolver modelo original simplificado
+    return(x)
+  })
+  
+  # Devolver modelos unificados concatenados (si hay varios)
+  paste(unique(modelos_unificados), collapse = ", ")
+}
+```
+
+```{r}
+# Aplicamos
+df_aviacion_comercial$ModeloUnificado <- sapply(df_aviacion_comercial$Model, unificar_modelo)
+```
+
+Dado que hay tantos aviones que solo aparecen 1 vez, vamos a quedarnos con los 100 primeros que más aparecen.
+
+```{r}
+model_frecuencias_V2 <- df_aviacion_comercial %>%
+  count(ModeloUnificado, sort = TRUE, name = "frecuencia")
+```
+
+Ahora vamos a adjuntar la capacidad para cada modelo:
+
+```{r}
+# Diccionario modelo-capacidad de asientos (valores aproximados)
+capacidad_asientos <- list(
+  "737" = 200,
+  "757" = 250,
+  "767" = 216,
+  "PA-31" = 6,
+  "208B" = 9,        # Cessna Caravan 208B
+  "747" = 416,
+  "PA-32" = 6,
+  "A320" = 150,
+  "777" = 314,
+  "DC-9" = 115,
+  "207" = 6,         # Cessna 207
+  "407" = 7,         # Bell 407 helicóptero
+  "CL-600-2B19" = 50, # Challenger 300/350 approx
+  "MD-80" = 155,
+  "A319" = 124,
+  "ERJ" = 50,        # General Embraer regional jet
+  "727" = 155,
+  "402C" = 10,       # Cessna 402
+  "1900D" = 19,
+  "207A" = 6,        # Similar a Cessna 207
+  "208" = 9,
+  "206" = 6,         # Cessna 206
+  "DHC-2" = 6,       # Beaver
+  "206L-1" = 6,      # Variantes Cessna 206
+  "DC-10" = 270,
+  "206B" = 6,
+  "A321" = 185,
+  "U206G" = 6,       # Cessna U206
+  "C-130" = 92,
+  "EMB-145LR" = 50,
+  "206L-3" = 6,
+  "U206F" = 6,
+  "1900C" = 19,
+  "717-200" = 106,
+  "MD-11" = 293,
+  "185" = 6,         # Cessna 185
+  "402B" = 10,
+  "787" = 242,
+  "DC-8" = 189,
+  "402" = 10,
+  "35A" = 6,
+  "369E" = 6,        # Helicóptero Hughes 369
+  "DHC-3" = 7,
+  "310R" = 11,
+  "369D" = 6,
+  "AS350" = 6,
+  "EMB-120" = 30,
+  "340B" = 34,
+  "560XL" = 8,
+  "A185F" = 6,
+  "CL-600-2C10" = 50,
+  "MD-11F" = 293,
+  "R44" = 4,
+  "421C" = 8,
+  "99" = 15,
+  "A300" = 266,
+  "AS350BA" = 6,
+  "172" = 4,
+  "180" = 4,
+  "EMB145" = 50,
+  "MD11" = 293,
+  "MU-2B-60" = 6,
+  "206-L4" = 6,
+  "210L" = 7,
+  "340A" = 34,
+  "AS 350 B2" = 6,
+  "C-99" = 15,
+  "PA-18" = 2,
+  "PA-23-250" = 4,
+  "SA226TC" = 19,
+  "T210N" = 4,
+  "U206" = 6,
+  "185F" = 6,
+  "421B" = 8,
+  "A109" = 7,
+  "A36" = 4,
+  "AS-350-B2" = 6,
+  "AS350B2" = 6,
+  "ATR-42-300" = 48,
+  "BEAVER DHC 2" = 6,
+  "CL 600 2C10" = 50,
+  "CL600-2B19" = 50,
+  "DHC-8-102" = 39,
+  "F28" = 65,
+  "MD-90" = 172,
+  "PA-34" = 6,
+  "R44 II" = 4,
+  "SA227-AC" = 19,
+  "172M" = 4,
+  "1900" = 19,
+  "560" = 8,
+  "AS 350 BA" = 6,
+  "C90A" = 8,
+  "CL-600-2D24" = 50,
+  "CL600 2D24" = 50,
+  "DHC-3T" = 7
+)
+```
+
+Ahora añadimos la columna capacidad para cada modelo
+
+```{r}
+# Creamos la nueva columna "Capacidad" mapeando según el modelo unificado
+df_aviacion_comercial$Capacidad <- capacidad_asientos[df_aviacion_comercial$ModeloUnificado]
+```
+
+Nos quedamos solo con las instancias que tienen capacidad
+
+```{r}
+# Filtramos las filas donde la columna Capacidad NO sea igual a "NULL"
+df_aviacion_comercial <- df_aviacion_comercial[df_aviacion_comercial$Capacidad != "NULL", ]
+```
+
+Ahora vamos a ver como ha evolucionado la cantidad de heridos de media con respecto a cada accidente, se calcula así (FatalInjuryCount + SeriousInjuryCount + MinorInjuryCount) / Capacidad \* 100, la capacidad depende de cada aerolínea y de su configuracion, lo que hemos hecho es poner la capacidad minima aproximada del avion, por ende un avion tiene una capacidad de entre 100 y 120 y nosotros ponemos 100. Esto significa que si una instancia concreta es de 110 y se hieren todos entonces saldrá un valor por encima de 100, lo capamos a 100% como máximo para evitar esto.
+
+```{r}
+df_aviacion_comercial$Capacidad <- as.numeric(df_aviacion_comercial$Capacidad)
+
+df_aviacion_comercial$IndiceHeridos <- (
+  df_aviacion_comercial$FatalInjuryCount +
+  df_aviacion_comercial$SeriousInjuryCount +
+  df_aviacion_comercial$MinorInjuryCount
+) / df_aviacion_comercial$Capacidad * 100
+
+# Limitar el porcentaje al 100%
+df_aviacion_comercial$IndiceHeridos <- pmin(df_aviacion_comercial$IndiceHeridos, 100)
+
+df_aviacion_comercial$IndiceHeridos <- round(df_aviacion_comercial$IndiceHeridos, 2)
+```
+
+#### Media de procentaje de heridos por año (usando la columna enriquecida)
+
+```{r}
+df_media_heridos_por_ano <- df_aviacion_comercial %>%
+  mutate(Ano = year(ymd_hms(EventDate))) %>%  # extraemos año
+  select(Ano, IndiceHeridos) %>%
+  group_by(Ano) %>%
+  summarise(MediaIndiceHeridos = round(mean(IndiceHeridos, na.rm = TRUE), 2)) %>%
+  ungroup()
+
+write.csv(df_media_heridos_por_ano, "media_heridos_por_ano.csv", row.names = FALSE)
+```
+
+Ahora voy a agrupar en un mismo dataset tanto la media de heridos como el total de accidentse por año
+
+```{r}
+df_resumen_por_ano <- df_aviacion_comercial %>%
+  mutate(Ano = year(ymd_hms(EventDate))) %>%  # extraemos el año del evento
+  group_by(Ano) %>%
+  summarise(
+    MediaIndiceHeridos = round(mean(IndiceHeridos, na.rm = TRUE), 2),  # media redondeada
+    Accidentes = n()  # cantidad de accidentes
+  ) %>%
+  ungroup()
+
+write.csv(df_resumen_por_ano, "df_resumen_por_ano.csv", row.names = FALSE)
+```
+
+#### Accidentes por geografía
+
+Vamos a ver la densidad de accidentes por pais, excluyendo a eeuu que tiene muchisimos mas que cualquier otro pais
+
+```{r}
+df_accidentes_por_pais <- df_aviacion_comercial %>%
+  group_by(Country) %>%
+  summarise(TotalAccidentes = n()) %>%
+  arrange(desc(TotalAccidentes))
+
+write.csv(df_accidentes_por_pais, "df_accidentes_por_pais.csv", row.names = FALSE)
+```
+
+Ahora lo vamos a ver dentro de estados unidos
+
+```{r}
+df_accidentes_por_estado <- df_aviacion_comercial %>%
+  filter(Country == "United States") %>%
+  group_by(State) %>%
+  summarise(TotalAccidentes = n()) %>%
+  arrange(desc(TotalAccidentes))
+write.csv(df_accidentes_por_estado, "df_accidentes_por_estado.csv", row.names = FALSE)
+```
+
+#### Aerolineas con mas accidentes
+
+Vamos a unificar los nombres de los operadores
+
+```{r}
+if (!require(stringdist)) install.packages("stringdist")
+library(stringdist)
+
+# 1. Normalizamos la columna Operator en df_aviacion_comercial
+df_aviacion_comercial$Operator_clean <- toupper(df_aviacion_comercial$Operator)
+df_aviacion_comercial$Operator_clean <- gsub("\\b(INC|CORP|CORPORATION|LLC|CO|L\\.L\\.C\\.|LTD|LTD\\.?|INC\\.)\\b", "", df_aviacion_comercial$Operator_clean)
+df_aviacion_comercial$Operator_clean <- gsub("[[:punct:]]", "", df_aviacion_comercial$Operator_clean)
+df_aviacion_comercial$Operator_clean <- gsub("\\s+", " ", df_aviacion_comercial$Operator_clean)
+df_aviacion_comercial$Operator_clean <- trimws(df_aviacion_comercial$Operator_clean)
+
+# 2. Eliminamos NA y vacíos en los nombres
+df_aviacion_comercial <- df_aviacion_comercial[!is.na(df_aviacion_comercial$Operator_clean) & df_aviacion_comercial$Operator_clean != "", ]
+
+# 3. Extraemos los nombres únicos limpios
+unique_names <- unique(df_aviacion_comercial$Operator_clean)
+
+# 4. Función para agrupar nombres similares con control de NA
+group_similar_names <- function(names, threshold = 0.2) {
+  groups <- list()
+  for (name in names) {
+    # Ignorar valores NA o vacíos (por seguridad)
+    if (is.na(name) || name == "") next
+    matched <- FALSE
+    for (i in seq_along(groups)) {
+      ref <- groups[[i]][1]
+      dist <- stringdist(name, ref, method = "lv") / max(nchar(name), nchar(ref))
+      if (!is.na(dist) && dist < threshold) {
+        groups[[i]] <- c(groups[[i]], name)
+        matched <- TRUE
+        break
+      }
+    }
+    if (!matched) {
+      groups[[length(groups) + 1]] <- c(name)
+    }
+  }
+  return(groups)
+}
+
+# 5. Creamos los grupos de nombres similares
+grupos <- group_similar_names(unique_names, threshold = 0.2)
+
+# 6. Construimos el dataframe map con el nombre original y el agrupado
+map <- data.frame(
+  Operator_clean = unlist(grupos),
+  Operator_grouped = rep(sapply(grupos, `[`, 1), lengths(grupos)),
+  stringsAsFactors = FALSE
+)
+
+# 7. Unimos (merge) el map con df original para añadir la columna con los nombres agrupados
+df_aviacion_comercial <- merge(df_aviacion_comercial, map, by = "Operator_clean", all.x = TRUE)
+```
+
+Creamos el dataset
+
+```{r}
+df_operadores_con_fabricante <- df_aviacion_comercial %>%
+  filter(!is.na(Operator_grouped), !is.na(Make)) %>%
+  mutate(Operator_grouped = toupper(Operator_grouped),
+         Make = toupper(Make)) %>%
+  group_by(Operator_grouped, Make) %>%
+  summarise(Accidentes = n(), .groups = "drop") %>%
+  group_by(Operator_grouped) %>%
+  mutate(FabricantePrincipal = Make[which.max(Accidentes)],
+         TotalAccidentes = sum(Accidentes)) %>%
+  slice(1) %>%  # una fila por operador
+  ungroup() %>%
+  select(Operator_grouped, TotalAccidentes, FabricantePrincipal) %>%
+  arrange(desc(TotalAccidentes))
+write.csv(df_operadores_con_fabricante, "df_operadores_con_fabricante.csv", row.names = FALSE)
+```
+
+#### Accidentes por fabricante
+
+```{r}
+df_accidentes_por_fabricante <- df_aviacion_comercial %>%
+  mutate(Make = toupper(Make)) %>%  # estandarizamos a mayúsculas
+  count(Make, sort = TRUE, name = "NumAccidentes")
+write.csv(df_accidentes_por_fabricante, "df_accidentes_por_fabricante.csv", row.names = FALSE)
+```
+
+```{r}
+df_accidentes_por_modelo <- df_aviacion_comercial %>%
+  mutate(Model = toupper(Model)) %>%  # estandarizamos
+  count(Model, sort = TRUE, name = "NumAccidentes")
+write.csv(df_accidentes_por_modelo, "df_accidentes_por_modelo.csv", row.names = FALSE)
+```
+
+#### Ahora vamos a contar los accidentes por dia de la semana
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+df_accidentes_por_dia_semana <- df_aviacion_comercial %>%
+  mutate(DiaSemana = wday(ymd_hms(EventDate), label = TRUE, abbr = FALSE, week_start = 1)) %>%  # lunes como primer día
+  count(DiaSemana, name = "NumAccidentes") %>%
+  arrange(match(DiaSemana, c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")))
+
+write.csv(df_accidentes_por_dia_semana, "df_accidentes_por_dia_semana.csv", row.names = FALSE)
+```
+
+Vamos a contar cuales han sido los dias mas peligrosos, para ello vamos a contar cuántos accidentes hubo de cada tipo de HighestInjuryLevel por día de la semana
+
+```{r}
+df_injury_por_dia <- df_aviacion_comercial %>%
+  filter(!is.na(HighestInjuryLevel), HighestInjuryLevel != "") %>%
+  mutate(DiaSemana = wday(ymd_hms(EventDate), label = TRUE, abbr = FALSE, week_start = 1)) %>%
+  group_by(DiaSemana, HighestInjuryLevel) %>%
+  summarise(NumAccidentes = n(), .groups = "drop") %>%
+  arrange(DiaSemana, desc(NumAccidentes))
+write.csv(df_injury_por_dia, "df_injury_por_dia.csv", row.names = FALSE)
+```
+
+Contamos el número de accidentes por día de la semana y tipo de lesión, junto con la media del índice de heridos redondeada a dos decimales. Cómo varían la frecuencia y gravedad de los accidentes según el día de la semana y el tipo de lesión, mostrando qué días y lesiones son más comunes y cómo se relacionan con el índice promedio de heridos.
+
+```{r}
+df_injury_por_dia <- df_aviacion_comercial %>%
+  filter(!is.na(HighestInjuryLevel), HighestInjuryLevel != "") %>%
+  mutate(
+    DiaSemana = wday(ymd_hms(EventDate), label = TRUE, abbr = FALSE, week_start = 1)
+  ) %>%
+  group_by(DiaSemana, HighestInjuryLevel) %>%
+  summarise(
+    NumAccidentes = n(),
+    MediaIndiceHeridos = round(mean(IndiceHeridos, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(DiaSemana, desc(NumAccidentes))
+
+write.csv(df_injury_por_dia, "df_injury_por_dia.csv", row.names = FALSE)
+
+```
+
+#### Horas mas peligrosas
+
+```{r}
+df_accidentes_por_hora <- df_aviacion_comercial %>%
+  mutate(Hora = hour(ymd_hms(EventDate))) %>%  # Extraemos la hora
+  group_by(Hora) %>%
+  summarise(NumAccidentes = n(), .groups = "drop") %>%
+  arrange(Hora)
+
+write.csv(df_accidentes_por_hora, "accidentes_por_hora.csv", row.names = FALSE)
+```
+
+#### Aviación comercial vs privada
+
+Primero guardamos en un dataset los vuelos puramente privados (por ejemplo los que cogerían los millonarios)
+
+```{r}
+df_privados <- df_aviacion_general %>%
+  filter(PurposeOfFlight %in% c("EXEC", "BUS"))
+```
+
+Ahora contamos los accidentes por año
+
+```{r}
+
+# Añadir columna Año a ambos datasets
+df_aviacion_comercial <- df_aviacion_comercial %>%
+  mutate(Anio = year(ymd_hms(EventDate)))
+
+df_privados <- df_privados %>%
+  mutate(Anio = year(ymd_hms(EventDate)))
+
+# Contar accidentes por año
+accidentes_por_anio_comparativa <- bind_rows(
+  df_aviacion_comercial %>% select(Anio) %>% mutate(Tipo = "Comercial"),
+  df_privados %>% select(Anio) %>% mutate(Tipo = "Privado")
+) %>%
+  group_by(Anio, Tipo) %>%
+  summarise(Accidentes = n(), .groups = "drop")
+
+library(tidyr)
+
+# Reformatear a formato ancho
+accidentes_por_anio_wide <- accidentes_por_anio_comparativa %>%
+  pivot_wider(
+    names_from = Tipo,
+    values_from = Accidentes,
+    values_fill = 0  # En caso de que falten años para uno de los tipos
+  )
+
+
+write.csv(accidentes_por_anio_wide, "accidentes_por_anio_comparativa.csv", row.names = FALSE)
+```
+
+Ahora la proporcion de la lesion mas alta para ver cual tiende a ser mas peligroso
+
+```{r}
+# Agrupar y calcular proporciones
+proporcion_heridos <- bind_rows(
+  df_aviacion_comercial %>% select(HighestInjuryLevel) %>% mutate(Tipo = "Comercial"),
+  df_privados %>% select(HighestInjuryLevel) %>% mutate(Tipo = "Privado")
+) %>%
+  filter(!is.na(HighestInjuryLevel), HighestInjuryLevel != "") %>%
+  group_by(Tipo, HighestInjuryLevel) %>%
+  summarise(Casos = n(), .groups = "drop") %>%
+  group_by(Tipo) %>%
+  mutate(Proporcion = round(Casos / sum(Casos) * 100, 2)) %>%
+  ungroup()
+orden_niveles <- c("Fatal", "Serious", "Minor", "None")
+
+# Aplicar el orden
+proporcion_heridos$HighestInjuryLevel <- factor(
+  proporcion_heridos$HighestInjuryLevel,
+  levels = orden_niveles
+)
+
+# Ordenar el dataframe
+proporcion_heridos <- proporcion_heridos %>%
+  arrange(HighestInjuryLevel)
+
+write.csv(proporcion_heridos, "proporcion_heridos.csv", row.names = FALSE)
+```
